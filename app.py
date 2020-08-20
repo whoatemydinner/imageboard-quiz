@@ -1,29 +1,35 @@
 from PIL import Image, ImageTk
 from tkinter import ttk
 import json
+import os
+import sys
 import tkinter as tk
 import tkinter.scrolledtext as tkst
 import time
 import random
 import requests
 import shutil
+import threading
+import re
 
 
 def format_comment(text: str):
-    comment = text.replace("<br>", "\n")
-    comment = comment.replace("<span class=\"quote\">", "")
-    comment = comment.replace("</span>", "")
-    comment = comment.replace("<span class=\"deadlink\">", "")
+    comment = re.sub(r"<a.*?>", "", text)
+    comment = re.sub(r"<br>", "\n", comment)
+    comment = re.sub(r"<wbr>", "", comment)
+    comment = re.sub(r"<span.*?>", "", comment)
+    comment = re.sub(r"</.*?>", "", comment)
     comment = comment.replace("&gt;", ">")
     comment = comment.replace("&#039;", "'")
-    # text.replace("")
+    comment = comment.replace("&quot;", "\"")
     return comment
 
 
 class ImageboardQuizApplication:
     API_URL = "https://a.4cdn.org/"
     IMAGE_URL = "https://is2.4chan.org/"
-    CACHE_FOLDER = "resource\\cache\\"
+    CACHE_FOLDER_UNIX = "resource/cache/"
+    CACHE_FOLDER_WIN = "resource\\cache\\"
 
     def __init__(self):
         self.gui = None
@@ -92,7 +98,10 @@ class ImageboardQuizApplication:
         max_size = 300, 300
 
         suffix = "{}/{}".format(board, name)
-        cache_image_filepath = "{}{}".format(ImageboardQuizApplication.CACHE_FOLDER, name)
+        cache_image_filepath = "{}{}".format(
+            ImageboardQuizApplication.CACHE_FOLDER_WIN if sys.platform == 'win32'
+            else ImageboardQuizApplication.CACHE_FOLDER_UNIX,
+            name)
         request_url = "{}{}".format(ImageboardQuizApplication.IMAGE_URL, suffix)
         print(request_url)
 
@@ -104,6 +113,7 @@ class ImageboardQuizApplication:
         request = requests.get(request_url, stream=True)
 
         if request.status_code == 200:
+            os.makedirs(os.path.dirname(cache_image_filepath), exist_ok=True)
             with open(cache_image_filepath, 'wb') as file:
                 request.raw.decode_content = True
                 shutil.copyfileobj(request.raw, file)
@@ -121,6 +131,21 @@ class ImageboardQuizApplication:
             self.gui.change_status_bar(status)
 
 
+class Timer(threading.Thread):
+    def __init__(self, start_time):
+        threading.Thread.__init__(self)
+        self.time = start_time
+
+    def run(self):
+        while True:
+            self.count_down()
+
+    def count_down(self):
+        print("Time left: {}".format(self.time))
+        time.sleep(1)
+        self.time = self.time - 1
+
+
 class Game:
     def __init__(self, application, board_list):
         self.application = application
@@ -128,7 +153,11 @@ class Game:
 
         self.history = []
 
+        self.timer = None
+
     def start_level(self):
+        # self.timer = Timer(10)
+        # self.timer.start()
         self.application.enable_interactive_frame()
         board = self.get_random_board()
         print(board)
@@ -175,6 +204,9 @@ class Thread:
         self.subject = subject
         self.image = image
 
+    def __str__(self):
+        return "/{}/; user: {}, subject: {}, timestamp: {}".format(self.board, self.user, self.subject, self.timestamp)
+
 
 class MainWindow(tk.Tk):
     def __init__(self, application):
@@ -183,11 +215,11 @@ class MainWindow(tk.Tk):
         self.status_text = tk.StringVar()
         self.status_text.set("Ready")
 
-        self.game_frame = GameFrame(self, bg="#eef2ff")
+        self.game_frame = ThreadFrame(self, bg="#eef2ff")
         self.game_frame.grid(row=0, column=0)
 
         self.interactive_frame = InteractiveFrame(self)
-        self.interactive_frame.grid(row=1, column=0, sticky=tk.SE)
+        self.interactive_frame.grid(row=1, column=0, sticky="SWE")
 
         self.status_bar = tk.Label(self, textvar=self.status_text, bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.grid(row=2, column=0, sticky="SW")
@@ -226,10 +258,16 @@ class InteractiveFrame(tk.Frame):
 
         self.choice = tk.StringVar()
 
+        self.timer_label = tk.Label(self, bg=self["background"], text="Time left:")
+        self.timer_label.grid(row=0, column=0, sticky=tk.W, padx=10)
+        self.timer = tk.Label(self, bg=self["background"])
+        self.timer.grid(row=0, column=1, sticky=tk.W, padx=10)
+        self.grid_columnconfigure(1, weight=1)
+
         self.boards_dropdown = ttk.Combobox(self, values=[], state=tk.DISABLED)
-        self.boards_dropdown.grid(row=0, column=0, sticky=tk.E, padx=10)
+        self.boards_dropdown.grid(row=0, column=2, sticky=tk.E, padx=10)
         self.accept_button = tk.Button(self, text="Choose board", state=tk.DISABLED)
-        self.accept_button.grid(row=0, column=1, sticky=tk.E, padx=10)
+        self.accept_button.grid(row=0, column=3, sticky=tk.E, padx=10)
 
     def update_board_list(self, boards):
         self.boards_dropdown["values"] = boards
@@ -246,12 +284,13 @@ class InteractiveFrame(tk.Frame):
         self.update()
 
 
-class GameFrame(tk.Frame):
+class ThreadFrame(tk.Frame):
     def __init__(self, master, **params):
         super().__init__(master, **params)
 
         self.image_canvas = tk.Canvas(self, width=300, height=300, bg=self["background"])
         self.image_canvas.grid(row=0, column=0, rowspan=2)
+        self.update_image()
 
         self.subject_box = tk.Label(self, bg=self["background"], fg="#0f0c5d", font=('sans-serif', 10, 'bold'))
         self.subject_box.grid(row=0, column=1, sticky=tk.W)
@@ -260,32 +299,41 @@ class GameFrame(tk.Frame):
         self.user_box.grid(row=0, column=2, sticky=tk.W)
         self.trip_box = tk.Label(self, bg=self["background"])
         self.user_box.grid(row=0, column=3, sticky=tk.W)
-        self.timestamp_box = tk.Label(self, text="01/01/70(Thu)21:37:00", bg=self["background"])
+        self.timestamp_box = tk.Label(self, text="01/01/70(Thu)21:37:00", bg=self["background"], fg="#0d0d07")
         self.timestamp_box.grid(row=0, column=4, sticky=tk.W)
         self.grid_columnconfigure(4, weight=1)
 
         self.comment_box = tkst.ScrolledText(self, height=15, bg=self["background"], relief=tk.FLAT,
-                                             font=('sans-serif', 10))
+                                             font=('sans-serif', 10), fg="#0d0d07")
         self.comment_box.grid(row=1, column=1, columnspan=4)
 
     def update_thread_data(self, thread):
+        print(str(thread))
         if thread.subject is not None:
             self.subject_box["text"] = thread.subject
+        else:
+            self.subject_box["text"] = ""
         if thread.user is not None:
             self.user_box["text"] = thread.user
+        else:
+            self.user_box["text"] = "Anonymous"
         if thread.tripcode is not None:
             self.trip_box["text"] = thread.tripcode
+        else:
+            self.trip_box["text"] = ""
         self.timestamp_box["text"] = thread.timestamp
+
+        self.comment_box.delete("1.0", tk.END)
         if thread.comment is not None:
-            self.comment_box.delete("1.0", tk.END)
             self.comment_box.insert("1.0", format_comment(thread.comment))
 
-        if thread.image is not None:
-            print("Updating image")
-            tk_image = ImageTk.PhotoImage(thread.image)
-            self.image_canvas.gfx = tk_image
-            self.image_canvas.create_image(0, 0, image=self.image_canvas.gfx, anchor="nw")
+        self.update_image(image=thread.image)
+        self.update()
 
+    def update_image(self, image=None, extension=None):
+        tk_image = ImageTk.PhotoImage(image) if image is not None else ImageTk.PhotoImage(file="resource/logo.png")
+        self.image_canvas.gfx = tk_image
+        self.image_canvas.create_image(0, 0, image=self.image_canvas.gfx, anchor="nw")
         self.update()
 
 
