@@ -43,7 +43,7 @@ class ImageboardQuizApplication:
         board_list = self.download_board_list()
         self.update_board_dropdown(board_list)
         self.game = Game(self, board_list)
-        self.game.start_level()
+        self.game.start_round()
 
     def download_board_list(self):
         suffix = "boards.json"
@@ -92,6 +92,7 @@ class ImageboardQuizApplication:
         self.gui.update_board_dropdown(boards)
 
     def enable_interactive_frame(self):
+        print("{}: Enabling controls".format(self.__class__.__name__))
         self.gui.enable_interactive_frame()
 
     def download_image(self, board, name, extension):
@@ -130,20 +131,43 @@ class ImageboardQuizApplication:
         if self.gui is not None:
             self.gui.change_status_bar(status)
 
+    def clean_up(self):
+        if self.game is not None:
+            self.game.end_current_round()
+        self.clean_cache()
+
+    def clean_cache(self):
+        cache_image_filepath = ImageboardQuizApplication.CACHE_FOLDER_WIN \
+            if sys.platform == 'win32' else ImageboardQuizApplication.CACHE_FOLDER_UNIX
+        shutil.rmtree(cache_image_filepath)
+
 
 class Timer(threading.Thread):
-    def __init__(self, start_time):
+    def __init__(self, start_time, gui):
         threading.Thread.__init__(self)
-        self.time = start_time
+        self.time = start_time * 1.
+        self.stop_timer = threading.Event()
+        self.gui = gui
 
     def run(self):
-        while True:
-            self.count_down()
+        self.count_down()
 
     def count_down(self):
-        print("Time left: {}".format(self.time))
-        time.sleep(1)
-        self.time = self.time - 1
+        while True:
+            time.sleep(0.1)
+            self.time = self.time - 0.1
+            self.update_gui_timer()
+            if self.stop_timer.is_set():
+                print("Timer stopped!")
+                break
+
+    def update_gui_timer(self):
+        if self.gui is not None and not self.stop_timer.is_set():
+            self.gui.update_timer(self.time)
+
+    def set_stop_flag(self):
+        self.stop_timer.set()
+        print("Set stop flag")
 
 
 class Game:
@@ -152,20 +176,33 @@ class Game:
         self.boards = board_list
 
         self.history = []
+        self.current_round = None
 
-        self.timer = None
-
-    def start_level(self):
-        # self.timer = Timer(10)
-        # self.timer.start()
-        self.application.enable_interactive_frame()
+    def start_round(self):
         board = self.get_random_board()
-        print(board)
         thread = self.get_random_thread(board)
-        self.application.update_game_frame(thread)
+        self.current_round = Round(self, thread, 20.)
+        self.update_round(thread)
+
+    def end_current_round(self):
+        if self.current_round is not None:
+            self.history.append(self.current_round)
+            self.current_round.end()
+            self.current_round = None
 
     def get_random_board(self):
         return random.choice(self.boards)
+
+    def enable_interactive_frame(self):
+        print("{}: Enabling controls".format(self.__class__.__name__))
+        self.application.enable_interactive_frame()
+
+    def update_round(self, thread):
+        self.application.update_game_frame(thread)
+
+    def submit_answer(self, answer):
+        if self.current_round is not None:
+            self.current_round.compare_answer(answer)
 
     def get_random_thread(self, board):
         catalog = self.application.download_thread_list(board)
@@ -192,6 +229,30 @@ class Game:
         self.history.append(thread)
 
         return thread
+
+
+class Round:
+    def __init__(self, game, thread, time_limit):
+        self.game = game
+        self.thread = thread
+        self.time_limit = time_limit
+        self.timer = None
+
+        self.start_round()
+
+    def start_round(self):
+        self.game.enable_interactive_frame()
+        self.timer = Timer(self.time_limit, self.game.application.gui)
+        self.timer.start()
+
+    def end(self):
+        if self.timer is not None:
+            self.timer.set_stop_flag()
+
+    def compare_answer(self, answer):
+        self.end()
+        print(self.thread.board)
+        print(answer)
 
 
 class Thread:
@@ -233,6 +294,8 @@ class MainWindow(tk.Tk):
 
         self.config(menu=self.menu_bar)
 
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
     def change_status_bar(self, message=None):
         self.status_text.set(message if message is not None else "Ready")
         self.status_bar.update()
@@ -242,13 +305,25 @@ class MainWindow(tk.Tk):
 
     def update_board_dropdown(self, boards):
         print("updating board dropdown")
-        formatted_board_list = []
+        formatted_board_dict = {}
         for board in boards:
-            formatted_board_list.append("/{}/ - {}".format(board[0], board[2]))
-        self.interactive_frame.update_board_list(formatted_board_list)
+            board_formatted = ("/{}/ - {}".format(board[0], board[2]))
+            formatted_board_dict[board_formatted] = board[0]
+        self.interactive_frame.update_board_list(formatted_board_dict)
 
     def enable_interactive_frame(self):
         self.interactive_frame.enable_elements()
+
+    def update_timer(self, timer_time):
+        self.interactive_frame.update_timer(timer_time)
+
+    def on_closing(self):
+        self.application.clean_up()
+        time.sleep(0.5)
+        self.destroy()
+
+    def submit_answer(self, answer):
+        self.application.game.submit_answer(answer)
 
 
 class InteractiveFrame(tk.Frame):
@@ -256,6 +331,7 @@ class InteractiveFrame(tk.Frame):
         super().__init__(master)
         self.master = master
 
+        self.board_dict = {}
         self.choice = tk.StringVar()
 
         self.timer_label = tk.Label(self, bg=self["background"], text="Time left:")
@@ -264,13 +340,14 @@ class InteractiveFrame(tk.Frame):
         self.timer.grid(row=0, column=1, sticky=tk.W, padx=10)
         self.grid_columnconfigure(1, weight=1)
 
-        self.boards_dropdown = ttk.Combobox(self, values=[], state=tk.DISABLED)
+        self.boards_dropdown = ttk.Combobox(self, values=[], state=tk.DISABLED, textvariable=self.choice)
         self.boards_dropdown.grid(row=0, column=2, sticky=tk.E, padx=10)
-        self.accept_button = tk.Button(self, text="Choose board", state=tk.DISABLED)
+        self.accept_button = tk.Button(self, text="Choose board", state=tk.DISABLED, command=self.submit_answer)
         self.accept_button.grid(row=0, column=3, sticky=tk.E, padx=10)
 
-    def update_board_list(self, boards):
-        self.boards_dropdown["values"] = boards
+    def update_board_list(self, formatted_boards):
+        self.board_dict = formatted_boards
+        self.boards_dropdown["values"] = list(formatted_boards.keys())
         self.update()
 
     def disable_elements(self):
@@ -282,6 +359,12 @@ class InteractiveFrame(tk.Frame):
         self.boards_dropdown["state"] = tk.NORMAL
         self.accept_button["state"] = tk.NORMAL
         self.update()
+
+    def update_timer(self, timer_time):
+        self.timer["text"] = "{:.2f}s".format(timer_time)
+
+    def submit_answer(self):
+        self.master.submit_answer(self.board_dict[self.choice.get()])
 
 
 class ThreadFrame(tk.Frame):
