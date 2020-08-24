@@ -25,6 +25,81 @@ def format_comment(text: str):
     return comment
 
 
+def logging_message(obj, message):
+    print("{}: {}".format(obj.__class__.__name__, message))
+
+
+def clean_cache():
+    cache_image_filepath = ImageboardQuizApplication.CACHE_FOLDER_WIN \
+        if sys.platform == 'win32' else ImageboardQuizApplication.CACHE_FOLDER_UNIX
+    if os.path.exists(cache_image_filepath):
+        shutil.rmtree(cache_image_filepath)
+
+
+class MainWindow(tk.Tk):
+    def __init__(self, application):
+        tk.Tk.__init__(self)
+        self.application = application
+        self.status_text = tk.StringVar()
+        self.status_text.set("Ready")
+
+        self.sfw_var = tk.BooleanVar()
+        self.sfw_var.set(self.application.options["sfw"])
+        self.sfw_var.trace_add("write", lambda x, y, z: self.application.set_sfw_only(self.sfw_var))
+
+        self.game_frame = DisplayFrame(self, bg="#eef2ff")
+        self.game_frame.grid(row=0, column=0)
+
+        self.interactive_frame = InteractiveFrame(self)
+        self.interactive_frame.grid(row=1, column=0, sticky="SWE")
+
+        self.status_bar = tk.Label(self, textvar=self.status_text, bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.grid(row=2, column=0, sticky="SW")
+
+        self.menu_bar = tk.Menu(self)
+        self.game_menu = tk.Menu(self.menu_bar, tearoff=0)
+        self.game_menu.add_command(label="Begin", command=self.application.start_game)
+        self.game_menu.add_separator()
+        self.game_menu.add_command(label="Exit", command=self.quit)
+        self.menu_bar.add_cascade(label="Game", menu=self.game_menu)
+        self.options_menu = tk.Menu(self.menu_bar, tearoff=0)
+        self.options_menu.add_checkbutton(label="SFW boards only", onvalue=1, offvalue=0, variable=self.sfw_var)
+        self.menu_bar.add_cascade(label="Options", menu=self.options_menu)
+
+        self.config(menu=self.menu_bar)
+
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def update_status(self, message=None):
+        self.status_text.set(message if message is not None else "Ready")
+        self.status_bar.update()
+
+    def update_game_frame(self, thread):
+        self.game_frame.display_data(thread)
+
+    def update_board_dropdown(self, boards):
+        logging_message(self, "Updating board dropdown")
+        formatted_board_dict = {}
+        for board in boards:
+            board_formatted = ("/{}/ - {}".format(board[0], board[2]))
+            formatted_board_dict[board_formatted] = board[0]
+        self.interactive_frame.update_board_dropdown(formatted_board_dict)
+
+    def enable_interactive_frame(self):
+        self.interactive_frame.enable()
+
+    def update_timer(self, timer_time):
+        self.interactive_frame.update_timer(timer_time)
+
+    def on_closing(self):
+        self.application.clean_up()
+        time.sleep(0.5)
+        self.destroy()
+
+    def submit_answer(self, answer):
+        self.application.current_game.submit(answer)
+
+
 class ImageboardQuizApplication:
     API_URL = "https://a.4cdn.org/"
     IMAGE_URL = "https://is2.4chan.org/"
@@ -32,18 +107,27 @@ class ImageboardQuizApplication:
     CACHE_FOLDER_WIN = "resource\\cache\\"
 
     def __init__(self):
-        self.gui = None
-        self.game = None
+        self.interface = None
+        self.current_game = None
+        self.options = {"sfw": False, "round_length": 20}
+
+    def initialize_interface(self, interface_type):
+        if interface_type == "gui":
+            self.initialize_gui()
+        elif interface_type == "cli":
+            raise NotImplementedError("CLI mode is not yet implemented")
+        else:
+            raise ValueError("Unknown interface type {}".format(interface_type))
 
     def initialize_gui(self):
-        self.gui = MainWindow(self)
-        self.gui.mainloop()
+        self.interface = MainWindow(self)
+        self.interface.mainloop()
 
     def start_game(self):
         board_list = self.download_board_list()
         self.update_board_dropdown(board_list)
-        self.game = Game(self, board_list)
-        self.game.start_round()
+        self.current_game = Game(self, board_list)
+        self.current_game.start_round()
 
     def download_board_list(self):
         suffix = "boards.json"
@@ -59,7 +143,10 @@ class ImageboardQuizApplication:
             if "boards" in boards_dict:
                 for board in boards_dict["boards"]:
                     if "board" in board and board["board"] != "f":
-                        boards.append((board["board"], bool(board["ws_board"]), board["title"]))
+                        if self.options["sfw"] and bool(board["ws_board"]) is False:
+                            continue
+                        else:
+                            boards.append((board["board"], bool(board["ws_board"]), board["title"]))
             time.sleep(1.2)
 
         self.status_message_to_gui()
@@ -86,14 +173,14 @@ class ImageboardQuizApplication:
         return catalog_dict
 
     def update_game_frame(self, thread):
-        self.gui.update_game_frame(thread)
+        self.interface.update_game_frame(thread)
 
     def update_board_dropdown(self, boards):
-        self.gui.update_board_dropdown(boards)
+        self.interface.update_board_dropdown(boards)
 
     def enable_interactive_frame(self):
-        print("{}: Enabling controls".format(self.__class__.__name__))
-        self.gui.enable_interactive_frame()
+        logging_message(self, "Enabling controls")
+        self.interface.enable_interactive_frame()
 
     def download_image(self, board, name, extension):
         max_size = 300, 300
@@ -106,7 +193,7 @@ class ImageboardQuizApplication:
         request_url = "{}{}".format(ImageboardQuizApplication.IMAGE_URL, suffix)
         print(request_url)
 
-        if extension != ".png" and extension != ".jpg":
+        if extension != ".png" and extension != ".jpg" and extension != ".gif":
             return None
 
         self.status_message_to_gui("Downloading OP image...")
@@ -121,6 +208,9 @@ class ImageboardQuizApplication:
         time.sleep(1.2)
 
         image = Image.open(cache_image_filepath, mode='r')
+        if extension == ".gif":
+            image = image.seek(0)
+
         image.thumbnail(max_size, Image.ANTIALIAS)
 
         self.status_message_to_gui()
@@ -128,26 +218,26 @@ class ImageboardQuizApplication:
         return image
 
     def status_message_to_gui(self, status=None):
-        if self.gui is not None:
-            self.gui.change_status_bar(status)
+        if self.interface is not None:
+            self.interface.update_status(status)
 
     def clean_up(self):
-        if self.game is not None:
-            self.game.end_current_round()
-        self.clean_cache()
+        if self.current_game is not None:
+            self.current_game.end_current_round()
+        clean_cache()
 
-    def clean_cache(self):
-        cache_image_filepath = ImageboardQuizApplication.CACHE_FOLDER_WIN \
-            if sys.platform == 'win32' else ImageboardQuizApplication.CACHE_FOLDER_UNIX
-        shutil.rmtree(cache_image_filepath)
+    def set_sfw_only(self, value):
+        # print("Changing the value to {}".format(value.get()))
+        self.options["sfw"] = value.get()
 
 
 class Timer(threading.Thread):
-    def __init__(self, start_time, gui):
+    def __init__(self, start_time, gui, game):
         threading.Thread.__init__(self)
         self.time = start_time * 1.
         self.stop_timer = threading.Event()
         self.gui = gui
+        self.game = game
 
     def run(self):
         self.count_down()
@@ -158,7 +248,10 @@ class Timer(threading.Thread):
             self.time = self.time - 0.1
             self.update_gui_timer()
             if self.stop_timer.is_set():
-                print("Timer stopped!")
+                # print("Timer stopped!")
+                break
+            if self.time < 0.1:
+                self.interrupt_round()
                 break
 
     def update_gui_timer(self):
@@ -167,7 +260,10 @@ class Timer(threading.Thread):
 
     def set_stop_flag(self):
         self.stop_timer.set()
-        print("Set stop flag")
+        # print("Set stop flag")
+
+    def interrupt_round(self):
+        self.game.interrupt_round()
 
 
 class Game:
@@ -242,7 +338,7 @@ class Round:
 
     def start_round(self):
         self.game.enable_interactive_frame()
-        self.timer = Timer(self.time_limit, self.game.application.gui)
+        self.timer = Timer(self.time_limit, self.game.application.interface)
         self.timer.start()
 
     def end(self):
@@ -269,63 +365,6 @@ class Thread:
         return "/{}/; user: {}, subject: {}, timestamp: {}".format(self.board, self.user, self.subject, self.timestamp)
 
 
-class MainWindow(tk.Tk):
-    def __init__(self, application):
-        tk.Tk.__init__(self)
-        self.application = application
-        self.status_text = tk.StringVar()
-        self.status_text.set("Ready")
-
-        self.game_frame = ThreadFrame(self, bg="#eef2ff")
-        self.game_frame.grid(row=0, column=0)
-
-        self.interactive_frame = InteractiveFrame(self)
-        self.interactive_frame.grid(row=1, column=0, sticky="SWE")
-
-        self.status_bar = tk.Label(self, textvar=self.status_text, bd=1, relief=tk.SUNKEN, anchor=tk.W)
-        self.status_bar.grid(row=2, column=0, sticky="SW")
-
-        self.menu_bar = tk.Menu(self)
-        self.game_menu = tk.Menu(self.menu_bar, tearoff=0)
-        self.game_menu.add_command(label="Begin", command=self.application.start_game)
-        self.game_menu.add_separator()
-        self.game_menu.add_command(label="Exit", command=self.quit)
-        self.menu_bar.add_cascade(label="Game", menu=self.game_menu)
-
-        self.config(menu=self.menu_bar)
-
-        self.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    def change_status_bar(self, message=None):
-        self.status_text.set(message if message is not None else "Ready")
-        self.status_bar.update()
-
-    def update_game_frame(self, thread):
-        self.game_frame.update_thread_data(thread)
-
-    def update_board_dropdown(self, boards):
-        print("updating board dropdown")
-        formatted_board_dict = {}
-        for board in boards:
-            board_formatted = ("/{}/ - {}".format(board[0], board[2]))
-            formatted_board_dict[board_formatted] = board[0]
-        self.interactive_frame.update_board_list(formatted_board_dict)
-
-    def enable_interactive_frame(self):
-        self.interactive_frame.enable_elements()
-
-    def update_timer(self, timer_time):
-        self.interactive_frame.update_timer(timer_time)
-
-    def on_closing(self):
-        self.application.clean_up()
-        time.sleep(0.5)
-        self.destroy()
-
-    def submit_answer(self, answer):
-        self.application.game.submit_answer(answer)
-
-
 class InteractiveFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master)
@@ -342,20 +381,20 @@ class InteractiveFrame(tk.Frame):
 
         self.boards_dropdown = ttk.Combobox(self, values=[], state=tk.DISABLED, textvariable=self.choice)
         self.boards_dropdown.grid(row=0, column=2, sticky=tk.E, padx=10)
-        self.accept_button = tk.Button(self, text="Choose board", state=tk.DISABLED, command=self.submit_answer)
+        self.accept_button = tk.Button(self, text="Choose board", state=tk.DISABLED, command=self.submit)
         self.accept_button.grid(row=0, column=3, sticky=tk.E, padx=10)
 
-    def update_board_list(self, formatted_boards):
+    def update_board_dropdown(self, formatted_boards):
         self.board_dict = formatted_boards
         self.boards_dropdown["values"] = list(formatted_boards.keys())
         self.update()
 
-    def disable_elements(self):
+    def disable(self):
         self.boards_dropdown["state"] = tk.DISABLED
         self.accept_button["state"] = tk.DISABLED
         self.update()
 
-    def enable_elements(self):
+    def enable(self):
         self.boards_dropdown["state"] = tk.NORMAL
         self.accept_button["state"] = tk.NORMAL
         self.update()
@@ -363,11 +402,11 @@ class InteractiveFrame(tk.Frame):
     def update_timer(self, timer_time):
         self.timer["text"] = "{:.2f}s".format(timer_time)
 
-    def submit_answer(self):
-        self.master.submit_answer(self.board_dict[self.choice.get()])
+    def submit(self):
+        self.master.submit(self.board_dict[self.choice.get()])
 
 
-class ThreadFrame(tk.Frame):
+class DisplayFrame(tk.Frame):
     def __init__(self, master, **params):
         super().__init__(master, **params)
 
@@ -390,30 +429,30 @@ class ThreadFrame(tk.Frame):
                                              font=('sans-serif', 10), fg="#0d0d07")
         self.comment_box.grid(row=1, column=1, columnspan=4)
 
-    def update_thread_data(self, thread):
-        print(str(thread))
+    def reset(self):
+        self.update_image()
+        self.subject_box["text"] = ""
+        self.user_box["text"] = "Anonymous"
+        self.trip_box["text"] = ""
+        self.timestamp_box["text"] = "01/01/70(Thu)21:37:00"
+        self.comment_box.delete("1.0", tk.END)
+        self.update()
+
+    def display_data(self, thread):
+        self.reset()
         if thread.subject is not None:
             self.subject_box["text"] = thread.subject
-        else:
-            self.subject_box["text"] = ""
         if thread.user is not None:
             self.user_box["text"] = thread.user
-        else:
-            self.user_box["text"] = "Anonymous"
         if thread.tripcode is not None:
             self.trip_box["text"] = thread.tripcode
-        else:
-            self.trip_box["text"] = ""
         self.timestamp_box["text"] = thread.timestamp
-
-        self.comment_box.delete("1.0", tk.END)
         if thread.comment is not None:
             self.comment_box.insert("1.0", format_comment(thread.comment))
-
         self.update_image(image=thread.image)
         self.update()
 
-    def update_image(self, image=None, extension=None):
+    def update_image(self, image=None):
         tk_image = ImageTk.PhotoImage(image) if image is not None else ImageTk.PhotoImage(file="resource/logo.png")
         self.image_canvas.gfx = tk_image
         self.image_canvas.create_image(0, 0, image=self.image_canvas.gfx, anchor="nw")
@@ -422,4 +461,4 @@ class ThreadFrame(tk.Frame):
 
 if __name__ == "__main__":
     app = ImageboardQuizApplication()
-    app.initialize_gui()
+    app.initialize_interface("gui")
