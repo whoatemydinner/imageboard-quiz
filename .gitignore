@@ -1,3 +1,4 @@
 .idea/
 venv/
 resource/cache/
+__pycache__/
